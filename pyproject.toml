@@ -1,0 +1,20 @@
+[project]
+name = "db-delay-tracker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Fin", email = "xsleepless.alice@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "lxml>=6.1.3",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+db-delay-tracker = "db_delay_tracker:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"

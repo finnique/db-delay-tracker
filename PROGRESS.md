@@ -46,12 +46,13 @@ use it to catch up after a break instead of re-reading the whole chat.
   - Each `<ar>`/`<dp>` in `fchg` can carry multiple `<m>` (message) elements, each with its own `ts-tts` — confirms the "late-arriving duplicate updates" problem from CLAUDE.md: polling repeatedly will re-see the same stop `id` with an evolving message set, so storage/merge must be idempotent, not append-only.
   - Message type codes (`t="d"`, `t="h"`, etc.) aren't self-evident from the XML — need the OpenAPI spec doc to decode them (not yet pulled locally).
 - Considered and rejected using the third-party `deutsche-bahn-api` PyPI package: it parses responses for you, which conflicts with the "collector stores raw XML untouched" architecture rule, and using it would remove the point of this project (learning to handle the raw API's messiness).
+- Added a pointer from `CLAUDE.md` to this file so the plan and the record are easy to find from either side.
+- Committed everything: client, stations list, exploration script, fixtures, this log (`1c30ca5 add log, explore_api`). `CLAUDE.md` itself stays untracked/local by design (see the history-scrub note above).
 
 ## Next session
 
 - [ ] Pull the official OpenAPI spec (`Timetables-*.json`) into `docs/` per CLAUDE.md, to decode message type codes (`t="d"`, `t="h"`, ...) properly instead of guessing.
 - [ ] Look at `/rchg` (recent changes) fixture to compare against `/fchg` — understand what's different about the "last ~2 min" feed.
 - [ ] Find/inspect a cancellation example in the saved fixtures (haven't confirmed what a cancelled stop looks like in the XML yet).
-- [ ] `git add`/commit the new client code, stations list, exploration script, and fixtures (check fixture file sizes aren't excessive for git before committing raw XML).
 - [ ] Decide phase 1 "done" criteria are met, then start Phase 2: Terraform for S3, IAM, SSM.
 - [ ] Explicitly plan for DST switch handling (late October) per CLAUDE.md rules — not yet addressed.

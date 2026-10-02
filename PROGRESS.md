@@ -18,6 +18,9 @@ use it to catch up after a break instead of re-reading the whole chat.
 | `src/db_delay_tracker/client.py` | `DBTimetablesClient` — thin wrapper around the DB Timetables API (auth headers, base URL, `/station`, `/plan`, `/fchg`, `/rchg` methods). Returns raw XML text, does not parse. Reused by future collector code. |
 | `src/db_delay_tracker/stations.py` | Hardcoded list of the 8 Munich-area stations we track (name, EVA number, ds100 code), confirmed via real `/station/{exact-name}` lookups. |
 | `scripts/explore_api.py` | Phase 1 exploration script. Pulls `/plan` + `/fchg` for all 8 stations and saves raw XML to `tests/fixtures/`. Run with `uv run scripts/explore_api.py`. |
+| `scripts/explore_rchg.py` | Fetches `/rchg` twice (2 min apart) for München Hbf + Ismaning and saves `tests/fixtures/rchg_{eva}_{HHMMSS}.xml`. Run with `uv run scripts/explore_rchg.py`. |
+| `scripts/compare.py` | First, rough rchg-vs-fchg comparison (the learning version). Superseded by `compare_chg.py`. |
+| `scripts/compare_chg.py` | Compares rchg snapshots against fchg: size, subset, same-content, snapshot overlap, plus a unified diff of one differing stop. Run with `uv run scripts/compare_chg.py`. |
 | `docs/Timetables-1.0.274.json` | Official OpenAPI spec for the Timetables API (downloaded from the DB marketplace after login). Source of truth for field meanings. |
 | `tests/fixtures/` | Real raw XML responses saved for later parser development/testing. `plan_{eva}_{yymmdd}{hh}.xml` (static schedule) and `fchg_{eva}.xml` (changes/delays) per station. |
 
@@ -63,10 +66,24 @@ use it to catch up after a break instead of re-reading the whole chat.
 - Fixtures already contain cancellations: 161 `cs="c"` events across the 8 stations (most at München Heimeranplatz and München Ost), 1 `cs="a"`.
 - Message counts in fixtures: f 3426, d 3418, h 1655, c 432, q 355, r 12, i 5.
 
+### 2026-10-02 — `/rchg` vs `/fchg`, cancelled stop
+
+- Wrote `scripts/explore_rchg.py`: two `/rchg` passes 2 minutes apart for Hbf (8000261) and Ismaning (8003092), plus a fresh `/fchg` fetched afterwards. Filenames carry an `HHMMSS` timestamp (no `:`, which Windows forbids in filenames).
+- Compared with `scripts/compare_chg.py` (results for Hbf; Ismaning had 0 and 1 stops in `rchg` vs 50 in `fchg`):
+  - **Size:** `rchg` 17 and 10 stops vs 468 in `fchg` (~2–4%).
+  - **Subset:** every `rchg` stop id also exists in `fchg`. `rchg` never adds stops.
+  - **Window:** between the two snapshots only 5 of 17 stops stayed, 12 dropped out, 5 were new. `rchg` is a sliding window of roughly 2 minutes, not an accumulating feed.
+  - **Content:** most `rchg` stops are identical to their `fchg` entry. The differing ones had only a `ct` changed by a minute (forecast revised; `fchg` was fetched 4–7 min after `rchg`). `rchg` stops are complete `<s>` elements (`ar`/`dp` + `<m>`), not fragments, so a newer one can replace the older version for that `id`.
+- **Design implication (proposal, not yet decided):** poll `/rchg` every ~90–120 s (changes are lost if polled less often than the window), and `/fchg` every ~10–15 min as the full-state backstop. 8 stations at 2 min = ~4 calls/min, well under the 60/min limit.
+- **Cancelled stop (München Ost, `fchg`):** `cs="c"` sits on the `<ar>`/`<dp>` event, not on `<s>`. The event still carries a stale `ct` (forecast from before the cancellation) and `clt` (cancellation time). **Delay calculation (`ct - pt`) must exclude `cs="c"` events.** Delay-cause `<m t="d">` messages can also be attached to cancelled events.
+- Open: not yet checked whether the `<dp>` of that example stop is also cancelled, nor the matching stop in `plan_8000262_...xml`. One `<m>` had `ts` and `ts-tts` a week apart (`ts` is the 10-digit local format, `ts-tts` is `yy-MM-dd HH:mm:ss.fff`); don't assume the two are equivalent when writing the parser.
+- Housekeeping: the 09-21 fixtures (`fchg_{eva}.xml`, `plan_*`) were deleted from the working tree to keep them out of the comparison; they are still in git. Restore with `git restore tests/fixtures/<file>` and do not commit the deletions.
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
-- [ ] Look at `/rchg` (recent changes) fixture to compare against `/fchg` — understand what's different about the "last ~2 min" feed.
-- [x] Cancellations: confirmed as `cs="c"` on `<ar>`/`<dp>` (see 2026-10-01). Still worth viewing one full example stop.
+- [x] Look at `/rchg` (recent changes) fixture and compare against `/fchg` (done 2026-10-02, see above).
+- [x] Cancellations: confirmed as `cs="c"` on `<ar>`/`<dp>` (see 2026-10-01). Viewed one example stop 2026-10-02; still to check `<dp>` and the plan entry.
+- [ ] Restore the 09-21 fixtures (or move them into a subfolder) before committing.
 - [ ] Decide phase 1 "done" criteria are met, then start Phase 2: Terraform for S3, IAM, SSM.
 - [ ] Explicitly plan for DST switch handling (late October) per CLAUDE.md rules — not yet addressed.

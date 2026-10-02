@@ -18,6 +18,7 @@ use it to catch up after a break instead of re-reading the whole chat.
 | `src/db_delay_tracker/client.py` | `DBTimetablesClient` — thin wrapper around the DB Timetables API (auth headers, base URL, `/station`, `/plan`, `/fchg`, `/rchg` methods). Returns raw XML text, does not parse. Reused by future collector code. |
 | `src/db_delay_tracker/stations.py` | Hardcoded list of the 8 Munich-area stations we track (name, EVA number, ds100 code), confirmed via real `/station/{exact-name}` lookups. |
 | `scripts/explore_api.py` | Phase 1 exploration script. Pulls `/plan` + `/fchg` for all 8 stations and saves raw XML to `tests/fixtures/`. Run with `uv run scripts/explore_api.py`. |
+| `docs/Timetables-1.0.274.json` | Official OpenAPI spec for the Timetables API (downloaded from the DB marketplace after login). Source of truth for field meanings. |
 | `tests/fixtures/` | Real raw XML responses saved for later parser development/testing. `plan_{eva}_{yymmdd}{hh}.xml` (static schedule) and `fchg_{eva}.xml` (changes/delays) per station. |
 
 ## Session log
@@ -49,10 +50,23 @@ use it to catch up after a break instead of re-reading the whole chat.
 - Added a pointer from `CLAUDE.md` to this file so the plan and the record are easy to find from either side.
 - Committed everything: client, stations list, exploration script, fixtures, this log (`1c30ca5 add log, explore_api`). `CLAUDE.md` itself stays untracked/local by design (see the history-scrub note above).
 
+### 2026-10-01 — OpenAPI spec
+
+- Saved the official spec (v1.0.274) to `docs/`. A third-party mirror of v1.0.213 was used briefly; diffed against the official file: identical content, so it was deleted.
+- Decoded from the spec:
+  - Event status `cs`/`ps`: `p` planned (also used when a cancellation is revoked), `a` added, `c` cancelled. Cancelled events also carry `clt` (cancellation time).
+  - Message type `t`: `h` HIM, `q` quality change, `f` free text, `d` cause of delay, `i` IBIS, `u` unassigned IBIS, `r` disruption, `c` connection.
+  - Stop `id` = `{daily trip id}-{YYMMdd}-{stop index}`; daily trip id can be negative; index > 100 means an added stop.
+  - `ct` is "estimated *or actual*" time, so some changed times are actuals (still treat as forecasts by default).
+  - `ppth` never includes the current station.
+- Not documented in the spec: message `c` codes (incl. delay-cause codes), `dm`, `ec`, `cat`. Treat as opaque or infer from data.
+- Fixtures already contain cancellations: 161 `cs="c"` events across the 8 stations (most at München Heimeranplatz and München Ost), 1 `cs="a"`.
+- Message counts in fixtures: f 3426, d 3418, h 1655, c 432, q 355, r 12, i 5.
+
 ## Next session
 
-- [ ] Pull the official OpenAPI spec (`Timetables-*.json`) into `docs/` per CLAUDE.md, to decode message type codes (`t="d"`, `t="h"`, ...) properly instead of guessing.
+- [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
 - [ ] Look at `/rchg` (recent changes) fixture to compare against `/fchg` — understand what's different about the "last ~2 min" feed.
-- [ ] Find/inspect a cancellation example in the saved fixtures (haven't confirmed what a cancelled stop looks like in the XML yet).
+- [x] Cancellations: confirmed as `cs="c"` on `<ar>`/`<dp>` (see 2026-10-01). Still worth viewing one full example stop.
 - [ ] Decide phase 1 "done" criteria are met, then start Phase 2: Terraform for S3, IAM, SSM.
 - [ ] Explicitly plan for DST switch handling (late October) per CLAUDE.md rules — not yet addressed.

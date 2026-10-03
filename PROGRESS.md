@@ -22,6 +22,7 @@ use it to catch up after a break instead of re-reading the whole chat.
 | `scripts/compare.py` | First, rough rchg-vs-fchg comparison (the learning version). Superseded by `compare_chg.py`. |
 | `scripts/compare_chg.py` | Compares rchg snapshots against fchg: size, subset, same-content, snapshot overlap, plus a unified diff of one differing stop. Run with `uv run scripts/compare_chg.py`. |
 | `docs/Timetables-1.0.274.json` | Official OpenAPI spec for the Timetables API (downloaded from the DB marketplace after login). Source of truth for field meanings. |
+| `infra/` | Terraform (Phase 2). `versions.tf` (provider pins, region), `main.tf` (S3 bucket + hardening), `ssm.tf` (2 SecureString params, placeholder values), `iam.tf` (collector Lambda role + log group), `variables.tf`, `outputs.tf`. Run from `infra/` with `$env:AWS_PROFILE="terraform-admin"`. State is local and gitignored; `.terraform.lock.hcl` is committed. |
 | `tests/fixtures/` | Real raw XML responses saved for later parser development/testing. `plan_{eva}_{yymmdd}{hh}.xml` (static schedule) and `fchg_{eva}.xml` (changes/delays) per station. |
 
 ## Session log
@@ -79,11 +80,25 @@ use it to catch up after a break instead of re-reading the whole chat.
 - Open: not yet checked whether the `<dp>` of that example stop is also cancelled, nor the matching stop in `plan_8000262_...xml`. One `<m>` had `ts` and `ts-tts` a week apart (`ts` is the 10-digit local format, `ts-tts` is `yy-MM-dd HH:mm:ss.fff`); don't assume the two are equivalent when writing the parser.
 - Housekeeping: the 09-21 fixtures (`fchg_{eva}.xml`, `plan_*`) were deleted from the working tree to keep them out of the comparison; they are still in git. Restore with `git restore tests/fixtures/<file>` and do not commit the deletions.
 
+### 2026-10-03 — Cancellation check, polling decision, Phase 2 (Terraform)
+
+- **Cancellations (München Ost fixture, 32 cancelled stops):** 11 have both `<ar>` and `<dp>` cancelled, 10 arrival only, 11 departure only. Cancellation is per event, so the fact-table grain is (stop `id`, arrival/departure). Cancelled events keep a stale `ct` (2 min after `pt` in the example), so `cs="c"` must be excluded from delay. Plan entries are normal (`pt` on both events). In the cancelled example `ts` and `ts-tts` agree; the week-apart case was a `t="h"` construction message. Plan: use `ts-tts` as the message timestamp.
+- **Polling design decided:** `/rchg` every 90 s, `/fchg` every 15 min, `/plan` hourly. About 5.3 calls/min for 8 stations (limit 60). Filenames carry `HHMMSS` so 90 s polls cannot collide; record a UTC fetch timestamp per response.
+- **Overlap policy:** the collector stores everything raw and never dedupes. The parser keeps all versions in staged Parquet (one row per stop id, event, fetch time, endpoint). The latest-state merge happens in dbt (Phase 5), keyed on `ts-tts` + fetch time.
+- **AWS access:** IAM Identity Center was rejected. Account instances do not support permission sets, and organization instances need AWS Organizations, which upgrades a free-plan account to paid and expires the credits. Used an IAM user `terraform-admin` (MFA on, access key in the `terraform-admin` CLI profile) instead. Account `891498120098`, region `eu-central-1`. Access-key CSV to be deleted. Known limitation for the README: SSO would be the production choice, and CLI keys do not enforce MFA.
+- **Terraform applied (11 resources):** S3 bucket `db-delay-tracker-data-891498120098` (public access blocked, ACLs disabled, SSE-S3, TLS-only policy, multipart cleanup, no versioning), two SSM SecureString parameters (`/db-delay-tracker/db-client-id`, `/db-delay-tracker/db-api-key`, placeholder values with `ignore_changes`), collector role `db-delay-tracker-collector-role`, log group (14-day retention).
+- **Collector role permissions:** `s3:PutObject` on `raw/*` only; `ssm:GetParameter` on the two parameter ARNs only (no `kms:Decrypt` needed with the AWS-managed `aws/ssm` key); `logs:CreateLogStream`/`PutLogEvents` on its own log group only; trust limited to `lambda.amazonaws.com`.
+- **Verified:** public access block (all four settings true); real credentials in SSM (client id read back OK); ~$5/month budget alert created; access-key CSV deleted.
+- **Key rotation:** the DB API client secret was pasted into the chat by mistake, so it was reset on the DB Marketplace (reset client secret; client id and subscription unchanged). New secret put into SSM (`--overwrite`) and `.env`, tested with a real call. Shell history lines containing `aws ssm put-parameter` removed from the PSReadLine history file. **Lesson: never paste secrets into a chat; for checks, share only non-secret output.**
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
 - [x] Look at `/rchg` (recent changes) fixture and compare against `/fchg` (done 2026-10-02, see above).
 - [x] Cancellations: confirmed as `cs="c"` on `<ar>`/`<dp>` (see 2026-10-01). Viewed one example stop 2026-10-02; still to check `<dp>` and the plan entry.
-- [ ] Restore the 09-21 fixtures (or move them into a subfolder) before committing.
-- [ ] Decide phase 1 "done" criteria are met, then start Phase 2: Terraform for S3, IAM, SSM.
-- [ ] Explicitly plan for DST switch handling (late October) per CLAUDE.md rules — not yet addressed.
+- [x] Restore the 09-21 fixtures: they are in git and in the tree, nothing to do.
+- [x] Cancellation check and polling design (done 2026-10-03, see above).
+- [x] Phase 2 Terraform applied (S3, IAM role, SSM).
+- [x] Real DB credentials in SSM, bucket public access block verified, access-key CSV deleted, budget alert created (see the 2026-10-03 entry).
+- [ ] Storage interface (local disk and S3) with the `raw/{endpoint}/station=.../date=.../{HHMMSS}.xml.gz` layout, then the collector (Phase 3). Start collecting locally soon: the API keeps no history.
+- [ ] DST (switch 2026-10-25): store a UTC fetch timestamp per response; the German-local `YYMMddHHmm` strings are ambiguous in the repeated 02:00-03:00 hour. Not yet implemented.

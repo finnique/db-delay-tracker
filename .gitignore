@@ -8,6 +8,13 @@ CLAUDE.md
 raw/
 staged/
 
+# terraform (state can contain secrets; the lock file .terraform.lock.hcl IS committed)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
 # editor/OS
 .vscode/
 .idea/

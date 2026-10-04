@@ -17,6 +17,10 @@ use it to catch up after a break instead of re-reading the whole chat.
 | `.env` | Real DB API credentials. Gitignored, never commit. |
 | `src/db_delay_tracker/client.py` | `DBTimetablesClient` — thin wrapper around the DB Timetables API (auth headers, base URL, `/station`, `/plan`, `/fchg`, `/rchg` methods). Returns raw XML text, does not parse. Reused by future collector code. |
 | `src/db_delay_tracker/stations.py` | Hardcoded list of the 8 Munich-area stations we track (name, EVA number, ds100 code), confirmed via real `/station/{exact-name}` lookups. |
+| `src/db_delay_tracker/keys.py` | `raw_key(endpoint, eva, fetched_at, plan_slice=None)` — pure function that builds the storage key from the UTC fetch time. Validates endpoint, slice and timezone-awareness. |
+| `src/db_delay_tracker/storage.py` | `Storage` protocol (single method `put(key, data)`), `LocalStorage` (atomic temp-file + rename; test fake / offline) and `S3Storage` (`put_object`, injectable client, lazy `boto3` import). |
+| `src/db_delay_tracker/collector.py` | `collect_once(client, storage, stations, endpoint, now, plan_slice=None)` — fetches one endpoint for every station, gzips, stores raw. One station failing does not stop the others; returns `CollectResult` per station. |
+| `tests/test_keys.py`, `test_storage.py`, `test_collector.py` | pytest suite (23 tests), including the DST-end repeated hour. Run with `uv run pytest`. |
 | `scripts/explore_api.py` | Phase 1 exploration script. Pulls `/plan` + `/fchg` for all 8 stations and saves raw XML to `tests/fixtures/`. Run with `uv run scripts/explore_api.py`. |
 | `scripts/explore_rchg.py` | Fetches `/rchg` twice (2 min apart) for München Hbf + Ismaning and saves `tests/fixtures/rchg_{eva}_{HHMMSS}.xml`. Run with `uv run scripts/explore_rchg.py`. |
 | `scripts/compare.py` | First, rough rchg-vs-fchg comparison (the learning version). Superseded by `compare_chg.py`. |
@@ -91,6 +95,24 @@ use it to catch up after a break instead of re-reading the whole chat.
 - **Verified:** public access block (all four settings true); real credentials in SSM (client id read back OK); ~$5/month budget alert created; access-key CSV deleted.
 - **Key rotation:** the DB API client secret was pasted into the chat by mistake, so it was reset on the DB Marketplace (reset client secret; client id and subscription unchanged). New secret put into SSM (`--overwrite`) and `.env`, tested with a real call. Shell history lines containing `aws ssm put-parameter` removed from the PSReadLine history file. **Lesson: never paste secrets into a chat; for checks, share only non-secret output.**
 
+### 2026-10-04 — Storage keys, storage interface, collector (start of Phase 3)
+
+- **Decisions:**
+  - Keys use the **UTC fetch time**, not German local time: local time repeats 02:00–03:00 when DST ends (2026-10-25), so two fetches could share a key. Layout is `raw/{endpoint}/station={eva}/date={YYYY-MM-DD}/{HHMMSS}.xml.gz`; `/plan` adds the requested hour slice: `{HHMMSS}_slice-{YYMMDDHH}.xml.gz` (the plan XML does not reliably say which slice was asked for).
+  - **CLAUDE.md is out of date on this** (it says `{HHMM}`, no UTC, and "AWS account pending"). CLAUDE.md is untracked/local by design, so update it by hand.
+  - `Storage` has only `put`, mirroring the collector role's single `s3:PutObject` on `raw/*`. The parser (Phase 4) will need a separate readable interface and its own role.
+  - **No local polling loop.** A laptop collector has gaps (sleep, shutdown) that are permanent because the API keeps no history, and the only credentials on the machine are the over-powerful `terraform-admin` ones. `LocalStorage` stays as a test fake and for offline runs. Go straight to the Lambda.
+  - Only HTTP 200 responses are stored (failures are logged and returned, never written). Empty `rchg` responses are stored. No dedupe, no retries yet.
+- **Code:** `keys.py`, `storage.py`, `collector.py` plus tests (23 passing). Added `pytest` and `tzdata` as dev dependencies (`tzdata` because Windows has no timezone database for `ZoneInfo("Europe/Berlin")`). Committed as `4247622`.
+- **Smoke test with the real API** (one `collect_once` into a scratchpad folder, not in the repo): `rchg`, `fchg`, `plan` for all 8 stations → 24 files, no errors, all gunzip and parse as `<timetable>`. `fchg` München Hbf: ~162 KB XML → ~20 KB gzipped. Estimate: ~4 KB per `rchg` pass and ~75 KB per `fchg` pass for all 8 stations, under 100 MB/day in total.
+- **Notes:**
+  - `client.py` returns `response.text` and the collector re-encodes it as UTF-8. Checked on a fixture: the XML declares UTF-8 and umlauts survive. Storing `response.content` would be more literally "untouched"; not changed because repo structure changes are proposed first.
+  - The Lambda handler must choose which `/plan` hour slice(s) to fetch, in German local time. `collect_once` just fetches the slice it is given.
+  - The two untracked `tests/fixtures/fchg_*_150240.xml` files are leftovers from the rchg comparison; undecided whether to commit or delete.
+- **Practice later (to write myself):**
+  - Delete `keys.py` and rewrite it until `tests/test_keys.py` passes (the tests are the spec; the original is in git).
+  - Write `LocalStorage` from scratch (about 10 lines).
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
@@ -100,5 +122,8 @@ use it to catch up after a break instead of re-reading the whole chat.
 - [x] Cancellation check and polling design (done 2026-10-03, see above).
 - [x] Phase 2 Terraform applied (S3, IAM role, SSM).
 - [x] Real DB credentials in SSM, bucket public access block verified, access-key CSV deleted, budget alert created (see the 2026-10-03 entry).
-- [ ] Storage interface (local disk and S3) with the `raw/{endpoint}/station=.../date=.../{HHMMSS}.xml.gz` layout, then the collector (Phase 3). Start collecting locally soon: the API keeps no history.
-- [ ] DST (switch 2026-10-25): store a UTC fetch timestamp per response; the German-local `YYMMddHHmm` strings are ambiguous in the repeated 02:00-03:00 hour. Not yet implemented.
+- [x] Storage interface, key builder and `collect_once` with tests, smoke-tested against the real API (done 2026-10-04).
+- [ ] Lambda handler (Phase 3): reads DB credentials from SSM, calls `collect_once` with `S3Storage`, picks the `/plan` hour slice(s) in Europe/Berlin, raises if any station failed so CloudWatch alarms fire.
+- [ ] Terraform for the Lambda: packaging, EventBridge Scheduler (`rchg` 90 s, `fchg` 15 min, `plan` hourly), CloudWatch alarm. Then invoke once by hand (`aws lambda invoke`) before enabling the schedules; this is also where the IAM role gets verified for real.
+- [ ] Start collecting before the DST switch (2026-10-25). The UTC keys already make the repeated 02:00–03:00 hour safe for storage; the parser must still handle the German-local `YYMMddHHmm` strings inside the XML, which stay ambiguous in that hour.
+- [ ] Decide on the two leftover `fchg_*_150240.xml` fixtures, and update CLAUDE.md (UTC keys, `HHMMSS`, AWS no longer pending).

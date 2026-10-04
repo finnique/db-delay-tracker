@@ -25,3 +25,10 @@ dev = [
     "pytest>=9.1.1",
     "tzdata>=2026.5",
 ]
+# What goes into the Lambda zip (see scripts/build_lambda.py). Separate from the
+# main dependencies so the zip does not ship lxml/python-dotenv, which the
+# collector does not use.
+lambda = [
+    "boto3",
+    "requests>=2.34.2",
+]

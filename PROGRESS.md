@@ -20,13 +20,15 @@ use it to catch up after a break instead of re-reading the whole chat.
 | `src/db_delay_tracker/keys.py` | `raw_key(endpoint, eva, fetched_at, plan_slice=None)` — pure function that builds the storage key from the UTC fetch time. Validates endpoint, slice and timezone-awareness. |
 | `src/db_delay_tracker/storage.py` | `Storage` protocol (single method `put(key, data)`), `LocalStorage` (atomic temp-file + rename; test fake / offline) and `S3Storage` (`put_object`, injectable client, lazy `boto3` import). |
 | `src/db_delay_tracker/collector.py` | `collect_once(client, storage, stations, endpoint, now, plan_slice=None)` — fetches one endpoint for every station, gzips, stores raw. One station failing does not stop the others; returns `CollectResult` per station. |
-| `tests/test_keys.py`, `test_storage.py`, `test_collector.py` | pytest suite (23 tests), including the DST-end repeated hour. Run with `uv run pytest`. |
+| `src/db_delay_tracker/handler.py` | Lambda entry point. `handler(event, context)` reads `{"endpoint": ...}`, gets DB credentials from SSM (cached across warm invocations), builds `S3Storage` from `BUCKET_NAME`, calls `run(...)`. `run` collects one endpoint (for `plan`: the current and next two Berlin-local hours via `plan_slices`) and raises `CollectionError` if any station failed. |
+| `scripts/build_lambda.py` | Builds `build/lambda.zip` (gitignored): `db_delay_tracker/` plus the `lambda` dependency group (`requests`, `boto3`) as Linux arm64 wheels at the `uv.lock` versions. Reproducible zip. Run with `uv run scripts/build_lambda.py` before `terraform apply`. |
+| `tests/test_keys.py`, `test_storage.py`, `test_collector.py`, `test_handler.py` | pytest suite (31 tests), including the DST-end repeated hour and DST-safe plan slices. Run with `uv run pytest`. |
 | `scripts/explore_api.py` | Phase 1 exploration script. Pulls `/plan` + `/fchg` for all 8 stations and saves raw XML to `tests/fixtures/`. Run with `uv run scripts/explore_api.py`. |
 | `scripts/explore_rchg.py` | Fetches `/rchg` twice (2 min apart) for München Hbf + Ismaning and saves `tests/fixtures/rchg_{eva}_{HHMMSS}.xml`. Run with `uv run scripts/explore_rchg.py`. |
 | `scripts/compare.py` | First, rough rchg-vs-fchg comparison (the learning version). Superseded by `compare_chg.py`. |
 | `scripts/compare_chg.py` | Compares rchg snapshots against fchg: size, subset, same-content, snapshot overlap, plus a unified diff of one differing stop. Run with `uv run scripts/compare_chg.py`. |
 | `docs/Timetables-1.0.274.json` | Official OpenAPI spec for the Timetables API (downloaded from the DB marketplace after login). Source of truth for field meanings. |
-| `infra/` | Terraform (Phase 2). `versions.tf` (provider pins, region), `main.tf` (S3 bucket + hardening), `ssm.tf` (2 SecureString params, placeholder values), `iam.tf` (collector Lambda role + log group), `variables.tf`, `outputs.tf`. Run from `infra/` with `$env:AWS_PROFILE="terraform-admin"`. State is local and gitignored; `.terraform.lock.hcl` is committed. |
+| `infra/` | Terraform (Phases 2–3). `versions.tf` (provider pins, region), `main.tf` (S3 bucket + hardening), `ssm.tf` (2 SecureString params, placeholder values), `iam.tf` (collector Lambda role + log group), `variables.tf`, `outputs.tf`, `lambda.tf` (collector function, arm64, python3.13), `scheduler.tf` (3 EventBridge schedules + scheduler role), `alarms.tf` (SNS email topic, errors and silence alarms). `terraform.tfvars` (gitignored) holds `alert_email` and `schedules_enabled`. Run from `infra/` with `$env:AWS_PROFILE="terraform-admin"`. State is local and gitignored; `.terraform.lock.hcl` is committed. |
 | `tests/fixtures/` | Real raw XML responses saved for later parser development/testing. `plan_{eva}_{yymmdd}{hh}.xml` (static schedule) and `fchg_{eva}.xml` (changes/delays) per station. |
 
 ## Session log
@@ -113,6 +115,22 @@ use it to catch up after a break instead of re-reading the whole chat.
   - Delete `keys.py` and rewrite it until `tests/test_keys.py` passes (the tests are the spec; the original is in git).
   - Write `LocalStorage` from scratch (about 10 lines).
 
+### 2026-10-04 (later) — Lambda handler, Terraform, go-live (Phase 3)
+
+- **Handler** (`handler.py`, commit `b39f90d`): see the file map. `plan` is fetched hourly for the current hour plus the next two (`PLAN_HOUR_OFFSETS = (0, 1, 2)`): `fchg` only lists changed stops, so every hour needs its plan captured at least once, and the extra offsets mean one failed run leaves no gap. Offsets are added in UTC and then converted to Berlin time, because adding hours to a Berlin datetime does wall-clock arithmetic and breaks around DST.
+- **Correction to the 2026-10-03 polling decision:** EventBridge Scheduler's `rate()` only accepts minutes, hours or days (checked in the docs), so 90 s is impossible. `rchg` now runs **every 1 minute** (window is ~2 min, so no gaps; about 9 calls/min in total against the limit of 60). `fchg` every 15 min, `plan` hourly.
+- **Packaging:** `scripts/build_lambda.py` + a new `lambda` dependency group in `pyproject.toml` (so the zip does not ship `lxml`/`python-dotenv`). `boto3` is bundled on purpose: the Lambda docs recommend including the SDK in the package, not relying on the runtime-included version. Python 3.13 runtime, arm64 (all runtimes support both architectures; deprecation June 2029). Zip is 17 MB, reproducible, contains `aarch64-linux` binaries.
+- **Terraform applied (10 resources):** the Lambda (timeout 90 s, 256 MB; ~105 MB used), the scheduler role, 3 schedules, SNS topic + email subscription, 2 alarms. Schedules were created disabled (`schedules_enabled = false`).
+- **Scheduler role permissions:** trust only `scheduler.amazonaws.com` with an `aws:SourceAccount` condition (confused-deputy protection); the only permission is `lambda:InvokeFunction` on this one function. Separate from the collector role: that one is what the function may do, this one is what the clock may do. Retries are off (`maximum_retry_attempts = 0`): a late retry of a short-window poll would only duplicate the next scheduled call.
+- **Alarms:** `Errors >= 3` in 15 min (the handler raises when any station fails; 3 ignores one-off API blips) and `Invocations < 10` in 15 min with missing data treated as breaching (a dead schedule produces no errors, so the first alarm would stay silent). Both notify the SNS topic; the silence alarm's actions are off while `schedules_enabled` is false. The alert email address is in the gitignored `terraform.tfvars` because the GitHub repo is public.
+- **Manual test before enabling:** `aws lambda invoke` for `rchg` / `fchg` / `plan` → 8 / 8 / 24 files in S3, no errors in the logs. This also proved the collector role's permissions for real (SSM read + decrypt, `PutObject` on `raw/*`, logs). Warm calls took 0.7 s (`fchg`) and 1.3 s (`plan`).
+- **Go-live:** email subscription confirmed, `terraform plan` reviewed (0 add, 4 change, 0 destroy: three schedules + the silence alarm's actions), then applied. Collection has been running unattended since **2026-10-04 ~10:00 UTC**. Checked the first minutes: `rchg` fires at :32 past every minute, 8 stored and 0 failed each time; `fchg` and `plan` fired once at 10:00:31.
+- **Lessons / gotchas:**
+  - Git Bash rewrites `/aws/...` arguments into Windows paths; set `MSYS_NO_PATHCONV=1` when passing log group names to the AWS CLI.
+  - `terraform apply` needs a reviewed `terraform plan` first (the tooling blocked a blind apply, rightly); show the plan, then apply.
+  - The Terraform registry docs page would not load, so the scheduler arguments were written from memory; `validate`, `plan` and `apply` accepted them.
+- The two leftover `fchg_*_150240.xml` fixtures were committed along with everything else.
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
@@ -123,7 +141,12 @@ use it to catch up after a break instead of re-reading the whole chat.
 - [x] Phase 2 Terraform applied (S3, IAM role, SSM).
 - [x] Real DB credentials in SSM, bucket public access block verified, access-key CSV deleted, budget alert created (see the 2026-10-03 entry).
 - [x] Storage interface, key builder and `collect_once` with tests, smoke-tested against the real API (done 2026-10-04).
-- [ ] Lambda handler (Phase 3): reads DB credentials from SSM, calls `collect_once` with `S3Storage`, picks the `/plan` hour slice(s) in Europe/Berlin, raises if any station failed so CloudWatch alarms fire.
-- [ ] Terraform for the Lambda: packaging, EventBridge Scheduler (`rchg` 90 s, `fchg` 15 min, `plan` hourly), CloudWatch alarm. Then invoke once by hand (`aws lambda invoke`) before enabling the schedules; this is also where the IAM role gets verified for real.
-- [ ] Start collecting before the DST switch (2026-10-25). The UTC keys already make the repeated 02:00–03:00 hour safe for storage; the parser must still handle the German-local `YYMMddHHmm` strings inside the XML, which stay ambiguous in that hour.
-- [ ] Decide on the two leftover `fchg_*_150240.xml` fixtures, and update CLAUDE.md (UTC keys, `HHMMSS`, AWS no longer pending).
+- [x] Lambda handler (done 2026-10-04, see above).
+- [x] Terraform for the Lambda, manual invoke, schedules enabled (done 2026-10-04, collecting since ~10:00 UTC).
+- [x] Start collecting before the DST switch (2026-10-25): running. The UTC keys make the repeated 02:00–03:00 hour safe for storage; the parser must still handle the German-local `YYMMddHHmm` strings inside the XML, which stay ambiguous in that hour. Also check what the API returns for plan slice `...02` on that day.
+- [ ] Check on the collector (e.g. tomorrow): file counts per endpoint and day in S3, CloudWatch logs for failures, that the alarm emails arrive (try triggering one deliberately, e.g. a bad invoke payload, to see the Errors alarm path), and whether the API ever returns errors or rate-limit responses (no retries exist yet).
+- [ ] Update CLAUDE.md by hand (untracked): UTC keys, `HHMMSS`, 1-minute `rchg`, AWS no longer pending.
+- [ ] Phase 4: parser Lambda (raw XML → Parquet, UTC timestamps) with pytest tests against the fixtures; separate readable storage interface and its own least-privilege role (`GetObject`/`ListBucket` on `raw/`, `PutObject` on `staged/`). Decide how to handle the ambiguous local-time strings during the DST hour.
+- [ ] Optional: store `response.content` instead of `response.text` in the client for byte-exact raw data; add one retry on transient API errors if the logs show them.
+- [ ] Practice (own coding): rewrite `keys.py` against `tests/test_keys.py`; write `LocalStorage` from scratch.
+- [ ] Known limitations for the README: IAM user instead of SSO (see 2026-10-03), `fchg`/`rchg` times are forecasts not measured actuals, no retries, polling gaps are unrecoverable, Terraform state is local.

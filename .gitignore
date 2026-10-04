@@ -20,3 +20,6 @@ crash.log
 .idea/
 .DS_Store
 Thumbs.db
+
+# lambda build output
+build/

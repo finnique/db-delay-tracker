@@ -15,3 +15,14 @@ variable "log_retention_days" {
   type        = number
   default     = 14
 }
+
+variable "alert_email" {
+  description = "Email address that receives the CloudWatch alarm notifications. Set in terraform.tfvars (gitignored)."
+  type        = string
+}
+
+variable "schedules_enabled" {
+  description = "Switch for the EventBridge schedules (and the silence alarm). Keep false until the Lambda has been invoked by hand and verified."
+  type        = bool
+  default     = false
+}

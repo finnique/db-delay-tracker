@@ -48,6 +48,27 @@ Status column current so this file alone answers "where am I and what's next".
 | `infra/` | Terraform (Phases 2–3). `versions.tf` (provider pins, region), `main.tf` (S3 bucket + hardening), `ssm.tf` (2 SecureString params, placeholder values), `iam.tf` (collector Lambda role + log group), `variables.tf`, `outputs.tf`, `lambda.tf` (collector function, arm64, python3.13), `scheduler.tf` (3 EventBridge schedules + scheduler role), `alarms.tf` (SNS email topic, errors and silence alarms). `terraform.tfvars` (gitignored) holds `alert_email` and `schedules_enabled`. Run from `infra/` with `$env:AWS_PROFILE="terraform-admin"`. State is local and gitignored; `.terraform.lock.hcl` is committed. |
 | `tests/fixtures/` | Real raw XML responses saved for later parser development/testing. `plan_{eva}_{yymmdd}{hh}.xml` (static schedule) and `fchg_{eva}.xml` (changes/delays) per station. |
 
+## Practice list (code to write myself)
+
+Parts worth writing by hand to learn, in the suggested order. The rest
+(Terraform, `build_lambda.py`, the SSM/boto3 wiring in `handler()`) is mostly
+configuration and glue: understand it, don't retype it.
+
+| # | What | Why it's worth it | Spec / feedback | Status |
+|---|---|---|---|---|
+| 1 | `keys.py` (`raw_key`) | Warm-up (30–45 min): validation, `strftime`, timezone conversion. | `tests/test_keys.py` (10 tests) | Not started |
+| 2 | `plan_slices` in `handler.py` | Trickiest concept: do the arithmetic in UTC, then convert to Berlin time. Teaches why naive datetime handling breaks around DST. | `tests/test_handler.py` (midnight, DST start and end) | Not started |
+| 3 | Phase 4 parser (raw XML → rows → Parquet) | The core of a data engineering portfolio: `cs="c"` cancellations, several `<m>` per stop, `pt`/`ct`, UTC conversion. Not written yet, so write it first and have it reviewed. | Real fixtures in `tests/fixtures/`; tests written alongside | Not started |
+| 4 | Phase 5 dbt/SQL models | Latest-state merge per stop and the delay calculation are window-function and dedup problems that come up in almost every data engineering interview. | dbt tests | Not started |
+| 5 | `LocalStorage` in `storage.py` | Small win (~10 lines): `pathlib` and the temp-file-then-rename pattern. | `tests/test_storage.py` | Not started |
+| 6 | `collect_once` in `collector.py` | Optional: loops, try/except, dataclass, gzip. | `tests/test_collector.py` | Not started |
+
+**How to practice without breaking anything**
+1. Work on a branch such as `practice/keys`, so half-finished code never lands on `main`.
+2. Delete the function body, run `uv run pytest`, and make the tests pass without looking at the original (it is in git).
+3. Ask Claude for hints, then for a review once done. Don't ask for the solution first.
+4. The live Lambda is unaffected: code only deploys when the zip is rebuilt and `terraform apply` is run.
+
 ## Session log
 
 ### 2026-09-21 — Phase 0 (setup) and Phase 1 (API exploration)
@@ -166,5 +187,5 @@ Status column current so this file alone answers "where am I and what's next".
 - [ ] Update CLAUDE.md by hand (untracked): UTC keys, `HHMMSS`, 1-minute `rchg`, AWS no longer pending.
 - [ ] Phase 4: parser Lambda (raw XML → Parquet, UTC timestamps) with pytest tests against the fixtures; separate readable storage interface and its own least-privilege role (`GetObject`/`ListBucket` on `raw/`, `PutObject` on `staged/`). Decide how to handle the ambiguous local-time strings during the DST hour.
 - [ ] Optional: store `response.content` instead of `response.text` in the client for byte-exact raw data; add one retry on transient API errors if the logs show them.
-- [ ] Practice (own coding): rewrite `keys.py` against `tests/test_keys.py`; write `LocalStorage` from scratch.
+- [ ] Practice: work through the Practice list section above (keys.py → plan_slices → parser).
 - [ ] Known limitations for the README: IAM user instead of SSO (see 2026-10-03), `fchg`/`rchg` times are forecasts not measured actuals, no retries, polling gaps are unrecoverable, Terraform state is local.

@@ -3,6 +3,23 @@
 CLAUDE.md is the plan. This file is the record of what actually happened —
 use it to catch up after a break instead of re-reading the whole chat.
 
+## Phases (status at a glance)
+
+The phase list comes from CLAUDE.md; this table adds where we are. Keep the
+Status column current so this file alone answers "where am I and what's next".
+
+| # | Phase | Status | Notes |
+|---|---|---|---|
+| 0 | Setup (repo, tooling, DB API access) | Done 2026-09-21 | |
+| 1 | Explore API locally, save fixtures | Done 2026-09-21 to 10-03 | Fixtures in `tests/fixtures/`, spec in `docs/`, polling design decided. |
+| 2 | Terraform: S3, IAM, SSM | Done 2026-10-03 | |
+| 3 | Collector Lambda + schedule + CloudWatch alarm | **Running since 2026-10-04 ~10:00 UTC** | Open: day-1 check, deliberate test of the Errors alarm email. |
+| 4 | Parser to Parquet + pytest tests + Glue/Athena | **Next** | Deadline pressure: DST change on 2026-10-25. |
+| 5 | dbt models: staging, latest-state merge per stop, fact table, marts, tests | Not started | |
+| 6 | GitHub Actions daily dbt build (OIDC), freshness + completeness checks | Not started | |
+| 7 | Export marts + Streamlit dashboard | Not started | |
+| 8 | README, diagrams, cost breakdown, known limitations | Not started | Limitations are collected in the Next session list. |
+
 ## Repository map
 
 | Path | What it is |

@@ -14,40 +14,78 @@ deduplicated here; the latest-state merge is dbt (Phase 5).
 Context the pure functions need (not in the XML): `endpoint`, `station_eva`,
 `fetched_at` (aware UTC datetime, from the key).
 
-## Tables
+## Why three tables
 
-Grain of every table includes the fetch (`fetched_at_utc`, `endpoint`,
-`station_eva`), because every snapshot is kept.
+Each table holds one kind of thing (one grain), and they join on `stop_id`.
 
-### events: one row per stop id x event type (ar/dp) x fetched file
+- `events`: what happens at a stop (planned and forecast times, cancelled
+  or not). The core of the delay calculation.
+- `messages`: why it happens (causes, disruption notices). Zero to many per
+  event, so a separate table keeps event rows and delay counts correct.
+- `trips`: which train it is (category, number, operator, route). Same for
+  arrival, departure and every snapshot, so stored once from `plan` only.
 
-| Column | Source | Notes |
-|---|---|---|
-| endpoint, station_eva, fetched_at_utc | context | |
-| stop_id | `<s id>` | join key between plan and changes |
-| event_type | tag | `ar` or `dp` |
-| pt_utc, pt_local_raw | `pt` | plan files only, else null |
-| ct_utc, ct_local_raw | `ct` | change files only, else null |
-| cs, ps | `cs`, `ps` | `p`/`a`/`c`; null if absent |
-| clt_utc, clt_local_raw | `clt` | cancellation time |
-| line, platform | `l`, `pp`/`cp` | |
-| time_ambiguous | derived | true if any time fell in the repeated DST hour |
+```
+trips (1 row per stop_id)
+   | stop_id
+   v
+events (stop_id x ar/dp x snapshot)  <--  messages (0..n per event or stop)
+```
 
-### messages: one row per `<m>` x fetched file
+Types: `str` = string, `ts` = timestamp (UTC, microsecond), `bool`.
+Every column except the keys and `endpoint`/`station_eva`/`fetched_at_utc`
+is nullable.
 
-| Column | Source | Notes |
-|---|---|---|
-| endpoint, station_eva, fetched_at_utc, stop_id | context / `<s>` | |
-| event_type | parent tag | null if the `<m>` sits directly under `<s>` |
-| level | derived | `stop` or `event` |
-| msg_id, type, code, category | `id`, `t`, `c`, `cat` | opaque, undocumented codes kept as-is |
-| ts_utc, ts_local_raw | `ts-tts` | not `ts`: `ts` is minute precision |
-| valid_from_utc, valid_to_utc | `from`, `to` | construction/disruption validity |
+## Shared columns (all three tables)
 
-### trips: one row per stop id, from plan files only
+| Column | Type | Contains | Purpose |
+|---|---|---|---|
+| `endpoint` | str | `plan`, `fchg` or `rchg` | Which API call the row came from |
+| `station_eva` | str | e.g. `8000262` | Station whose timetable it is; a stop id repeats along a trip |
+| `fetched_at_utc` | ts | when we asked the API (from the key) | Orders the versions of the same stop |
+| `stop_id` | str | `{trip id}-{YYMMdd}-{stop index}` | Join key between all tables |
 
-stop_id, station_eva, fetched_at_utc, category (`tl@c`), number (`tl@n`),
-operator (`tl@o`), trip type (`tl@t`), planned path (`ppth`, arrival side).
+## events: one row per stop id x event type x fetched file
+
+| Column | Type | Source | Contains | Purpose |
+|---|---|---|---|---|
+| `event_type` | str | tag | `ar` or `dp` | Arrival and departure have separate times and status |
+| `pt_utc` | ts | `pt` | planned time | Baseline for the delay; plan files only |
+| `pt_local_raw` | str | `pt` | e.g. `2610101221` | Safety copy for re-parsing the DST hour |
+| `ct_utc` | ts | `ct` | changed (forecast) time | `ct - pt` is the delay; change files only |
+| `ct_local_raw` | str | `ct` | original string | Safety copy |
+| `cs` | str | `cs` | changed status: `p`, `a`, `c` | Cancelled events are excluded from delay |
+| `ps` | str | `ps` | planned status | What the event was in the plan |
+| `clt_utc` | ts | `clt` | cancellation time | How early a cancellation was announced |
+| `clt_local_raw` | str | `clt` | original string | Safety copy |
+| `line` | str | `l` | e.g. `S5` | Compare lines |
+| `platform` | str | `pp` / `cp` | planned or changed platform | Platform changes are a disruption signal |
+| `time_ambiguous` | bool | derived | any time in the repeated DST hour | Marks rows whose UTC value is a best guess |
+
+## messages: one row per `<m>` x fetched file
+
+| Column | Type | Source | Contains | Purpose |
+|---|---|---|---|---|
+| `event_type` | str | parent tag | `ar`, `dp` or null | Event the message belongs to; null if directly under `<s>` |
+| `level` | str | derived | `stop` or `event` | Makes the null case explicit |
+| `msg_id` | str | `id` | e.g. `r74539117` | Spot the same message seen again in later snapshots |
+| `type` | str | `t` | `d` cause, `h` HIM, `q` quality, `f` text, `r` disruption, `c` connection, `i`/`u` IBIS | Kind of message |
+| `code` | str | `c` | e.g. `43` | Reason/quality code; undocumented, kept opaque |
+| `category` | str | `cat` | e.g. `Störung` | Readable label, mostly on `h` |
+| `ts_utc` | ts | `ts-tts` | when the message was issued | Ordering and recency (`ts-tts`, not `ts`: `ts` is minute precision) |
+| `ts_local_raw` | str | `ts-tts` | original string | Safety copy |
+| `valid_from_utc` | ts | `from` | start of validity | Whether a notice applied at a given delay |
+| `valid_to_utc` | ts | `to` | end of validity | Same |
+
+## trips: one row per stop id, from plan files only
+
+| Column | Type | Source | Contains | Purpose |
+|---|---|---|---|---|
+| `category` | str | `tl@c` | `S`, `RE`, `ICE`, ... | Main grouping: train type |
+| `number` | str | `tl@n` | e.g. `6598` | Identifies a specific service |
+| `operator` | str | `tl@o` | e.g. `800725` | Operator code |
+| `trip_type` | str | `tl@t` | `p` planned, `e` extra, `z` additional, `s` replacement | Regular vs special train |
+| `planned_path` | str | `ppth` | earlier stops joined with `\|` | Route; never includes the current station |
 
 ## Time handling
 
@@ -76,3 +114,4 @@ operator (`tl@o`), trip type (`tl@t`), planned path (`ppth`, arrival side).
 
 - What does `plan` return for slice `...02` on 2026-10-25?
 - Do `ts` and `ts-tts` ever disagree beyond seconds precision?
+- `trip_type` and `tl@f` (filter flag) values beyond the ones seen so far.

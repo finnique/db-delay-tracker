@@ -46,6 +46,8 @@ Status column current so this file alone answers "where am I and what's next".
 | `scripts/compare_chg.py` | Compares rchg snapshots against fchg: size, subset, same-content, snapshot overlap, plus a unified diff of one differing stop. Run with `uv run scripts/compare_chg.py`. |
 | `docs/Timetables-1.0.274.json` | Official OpenAPI spec for the Timetables API (downloaded from the DB marketplace after login). Source of truth for field meanings. |
 | `infra/` | Terraform (Phases 2–3). `versions.tf` (provider pins, region), `main.tf` (S3 bucket + hardening), `ssm.tf` (2 SecureString params, placeholder values), `iam.tf` (collector Lambda role + log group), `variables.tf`, `outputs.tf`, `lambda.tf` (collector function, arm64, python3.13), `scheduler.tf` (3 EventBridge schedules + scheduler role), `alarms.tf` (SNS email topic, errors and silence alarms). `terraform.tfvars` (gitignored) holds `alert_email` and `schedules_enabled`. Run from `infra/` with `$env:AWS_PROFILE="terraform-admin"`. State is local and gitignored; `.terraform.lock.hcl` is committed. |
+| `docs/parser-design.md` | Phase 4 design note: staged tables (`events`, `messages`, `trips`), column meanings, UTC/DST rules, open questions. |
+| `tests/scratch/` | Gitignored (via `raw/`) copies of real stored S3 files for parser practice. Not part of the repo. |
 | `tests/fixtures/` | Real raw XML responses saved for later parser development/testing. `plan_{eva}_{yymmdd}{hh}.xml` (static schedule) and `fchg_{eva}.xml` (changes/delays) per station. |
 
 ## Practice list (code to write myself)
@@ -178,6 +180,28 @@ configuration and glue: understand it, don't retype it.
 - Deliberate Errors alarm test: 3 invokes with `{"endpoint":"nonsense"}` (the handler raises `ValueError`, before any API call or S3 write). The ALARM email arrived. The alarm path (Lambda Errors → CloudWatch → SNS → email) is proven.
 - Gotcha: `$env:AWS_PROFILE` does not survive a new PowerShell window; `NoCredentials` means it is unset.
 
+### 2026-10-14 (later) — Phase 4 design, `local_to_utc` spec
+
+- Wrote `docs/parser-design.md`: three staged tables (`events`, `messages`, `trips`), pure parse functions plus a thin I/O layer, UTC conversion rules. Decisions taken: three tables not one wide table, `trips` from `plan` only, "closest to fetch time" + `time_ambiguous` flag for the DST hour.
+- Findings from the real files: `fchg`/`rchg` events carry only `ct` (no `pt`), so delay needs the plan join in dbt. Messages sit either directly under `<s>` or inside `<ar>`/`<dp>`. The `id` contains the trip's start time, not the stop's. `ts` and `ts-tts` are both local time.
+- Stored S3 files: `fchg` actually fires at :14, :29, :44, :59 (phase drifted from :00:31 at go-live). File names are UTC; `aws s3 ls` shows local time. Never assume quarter-hour boundaries. UTF-8 umlauts survive `response.text` re-encoding.
+- Four sample snapshots (München Ost, 2026-10-10, 10:00-10:59 UTC) downloaded to `tests/scratch/raw/...` (gitignored via `raw/`). Practice parser tests can use them.
+- Full column-by-column schema (type, source attribute, contents, purpose) for the three tables is in `docs/parser-design.md`; that file is the spec the parser is written against.
+- No code written yet; the parser is the practice item (#3). Standard library `zoneinfo` is enough, no `dateutil`.
+
+**`local_to_utc(raw, fetched_at) -> (utc_datetime, ambiguous)` — how to implement (to write myself)**
+
+1. `raw` is `YYMMddHHmm` in Berlin time (`strptime("%y%m%d%H%M")`); `fetched_at` is an aware UTC datetime.
+2. Build two candidates from the naive time: `replace(tzinfo=BERLIN, fold=0)` and `fold=1`, each `.astimezone(timezone.utc)`.
+3. Both candidates equal: normal time, return it with `ambiguous=False`.
+4. They differ: the repeated hour (02:00-02:59 on 2026-10-25). Return the candidate closest to `fetched_at`, with `ambiguous=True`.
+5. Gap (02:00-02:59 on 2026-03-29, time does not exist): convert the result back to Berlin and compare with the naive input; if they differ, raise `ValueError`. Think about the order of steps 3 and 5.
+6. Bad input (wrong length, non-digits): `ValueError`.
+
+Tests to write first, in order: summer +2 h; winter +1 h; `2610250230` fetched 2026-10-25 00:35 UTC gives 00:30 UTC + `True`; same raw fetched 01:40 UTC gives 01:30 UTC + `True`; `2603290230` raises; malformed input raises.
+
+Then: `parse_changes` (events + messages), `parse_plan` (events + trips), on branch `practice/parser`, tested against `tests/fixtures/` and `tests/scratch/`.
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
@@ -194,6 +218,9 @@ configuration and glue: understand it, don't retype it.
 - [x] Collector health check: done 2026-10-14 (counts and errors fine, see above).
 - [x] Errors alarm email path proven (done 2026-10-14, see above).
 - [ ] Update CLAUDE.md by hand (untracked): UTC keys, `HHMMSS`, 1-minute `rchg`, AWS no longer pending.
+- [ ] Commit `docs/parser-design.md` and `PROGRESS.md` on `main`, then `git checkout -b practice/parser`.
+- [ ] Write `local_to_utc` + tests (spec in the 2026-10-14 later entry), then `parse_changes` and `parse_plan`; have Claude review. Deadline: DST end 2026-10-25.
+- [ ] On 2026-10-25/26: check what `plan` returns for slice `...02` and whether `time_ambiguous` rows look right.
 - [ ] Phase 4: parser Lambda (raw XML → Parquet, UTC timestamps) with pytest tests against the fixtures; separate readable storage interface and its own least-privilege role (`GetObject`/`ListBucket` on `raw/`, `PutObject` on `staged/`). Decide how to handle the ambiguous local-time strings during the DST hour.
 - [ ] Optional: store `response.content` instead of `response.text` in the client for byte-exact raw data; add one retry on transient API errors if the logs show them.
 - [ ] Practice: work through the Practice list section above (keys.py → plan_slices → parser).

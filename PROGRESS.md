@@ -170,6 +170,14 @@ configuration and glue: understand it, don't retype it.
   - The Terraform registry docs page would not load, so the scheduler arguments were written from memory; `validate`, `plan` and `apply` accepted them.
 - The two leftover `fchg_*_150240.xml` fixtures were committed along with everything else.
 
+### 2026-10-14 — Collector health check (10 days in)
+
+- Ran by hand with the AWS CLI (`terraform-admin` profile): alarm states, daily Lambda `Invocations`/`Errors`/`Throttles` since 2026-10-04, log search for failures, S3 file counts per endpoint for one station and day.
+- Result: no errors, file counts matched the expected 1440 `rchg` / 96 `fchg` / 72 `plan` per station per day. No gaps found.
+- Alarm history showed only the silence alarm's go-live ALARM/OK pair; the Errors alarm had never fired.
+- Deliberate Errors alarm test: 3 invokes with `{"endpoint":"nonsense"}` (the handler raises `ValueError`, before any API call or S3 write). The ALARM email arrived. The alarm path (Lambda Errors → CloudWatch → SNS → email) is proven.
+- Gotcha: `$env:AWS_PROFILE` does not survive a new PowerShell window; `NoCredentials` means it is unset.
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
@@ -183,7 +191,8 @@ configuration and glue: understand it, don't retype it.
 - [x] Lambda handler (done 2026-10-04, see above).
 - [x] Terraform for the Lambda, manual invoke, schedules enabled (done 2026-10-04, collecting since ~10:00 UTC).
 - [x] Start collecting before the DST switch (2026-10-25): running. The UTC keys make the repeated 02:00–03:00 hour safe for storage; the parser must still handle the German-local `YYMMddHHmm` strings inside the XML, which stay ambiguous in that hour. Also check what the API returns for plan slice `...02` on that day.
-- [ ] Check on the collector tomorrow (first full day, 2026-10-05): file counts per endpoint and day in S3, CloudWatch logs for failures, that the alarm emails arrive (try triggering one deliberately, e.g. a bad invoke payload, to see the Errors alarm path), and whether the API ever returns errors or rate-limit responses (no retries exist yet).
+- [x] Collector health check: done 2026-10-14 (counts and errors fine, see above).
+- [x] Errors alarm email path proven (done 2026-10-14, see above).
 - [ ] Update CLAUDE.md by hand (untracked): UTC keys, `HHMMSS`, 1-minute `rchg`, AWS no longer pending.
 - [ ] Phase 4: parser Lambda (raw XML → Parquet, UTC timestamps) with pytest tests against the fixtures; separate readable storage interface and its own least-privilege role (`GetObject`/`ListBucket` on `raw/`, `PutObject` on `staged/`). Decide how to handle the ambiguous local-time strings during the DST hour.
 - [ ] Optional: store `response.content` instead of `response.text` in the client for byte-exact raw data; add one retry on transient API errors if the logs show them.

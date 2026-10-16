@@ -202,6 +202,14 @@ Tests to write first, in order: summer +2 h; winter +1 h; `2610250230` fetched 2
 
 Then: `parse_changes` (events + messages), `parse_plan` (events + trips), on branch `practice/parser`, tested against `tests/fixtures/` and `tests/scratch/`.
 
+### 2026-10-16 — `local_to_utc` practice (branch `practice/parser`)
+
+- Concepts worked through: `fold` (PEP 495: which occurrence of a repeated wall-clock time); equal UTC candidates = unambiguous, different = repeated hour, so `fetched_at` decides; why UTC (no DST, correct arithmetic and ordering); the S3 key digits are UTC only because `raw_key` writes UTC, the key has no marker, so the parser re-attaches `tzinfo=timezone.utc`.
+- Bugs found and fixed by the user: `replace(tzinfo=UTC)` instead of `astimezone(UTC)` (relabels instead of converting); `naive.astimezone(...)` on a naive value (uses the machine's zone); `fetch_at` vs `fetched_at` name that only worked via a module-level global.
+- State of `src/db_delay_tracker/timeparse.py`: `local_to_utc(raw, fetched_at)` is correct for normal times and the repeated hour (closest candidate to `fetched_at`, ties go to winter). `fetch_at_from_key(key)` handles fchg/rchg/plan keys via `.split("_")[0]` (works for all, no `plan` check needed).
+- Still to do in that file: delete the scratch code at the bottom (it runs on import) and the debug prints; add the gap check (`2603290230` must raise `ValueError`, belongs in the equal-candidates branch); input validation (wrong length / non-digits); use `timezone.utc` instead of `ZoneInfo("UTC")` in `fetch_at_from_key`.
+- **No tests written yet.** `tests/test_timeparse.py` does not exist. `scripts/local_to_utc.py` and `scripts/test_parser.py` are scratch files, untracked.
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
@@ -219,7 +227,8 @@ Then: `parse_changes` (events + messages), `parse_plan` (events + trips), on bra
 - [x] Errors alarm email path proven (done 2026-10-14, see above).
 - [ ] Update CLAUDE.md by hand (untracked): UTC keys, `HHMMSS`, 1-minute `rchg`, AWS no longer pending.
 - [ ] Commit `docs/parser-design.md` and `PROGRESS.md` on `main`, then `git checkout -b practice/parser`.
-- [ ] Write `local_to_utc` + tests (spec in the 2026-10-14 later entry), then `parse_changes` and `parse_plan`; have Claude review. Deadline: DST end 2026-10-25.
+- [ ] Finish `local_to_utc`: write `tests/test_timeparse.py` first (summer, winter, ambiguous early/late fetch, gap raises, malformed parametrized, then boundary cases 02:00/02:59/03:00), clean up the file (see the 2026-10-16 entry), have Claude review. Also a test for `fetch_at_from_key`, ideally a round trip with `raw_key`.
+- [ ] Then `parse_changes` and `parse_plan` (spec in the 2026-10-14 later entry). Deadline: DST end 2026-10-25.
 - [ ] On 2026-10-25/26: check what `plan` returns for slice `...02` and whether `time_ambiguous` rows look right.
 - [ ] Phase 4: parser Lambda (raw XML → Parquet, UTC timestamps) with pytest tests against the fixtures; separate readable storage interface and its own least-privilege role (`GetObject`/`ListBucket` on `raw/`, `PutObject` on `staged/`). Decide how to handle the ambiguous local-time strings during the DST hour.
 - [ ] Optional: store `response.content` instead of `response.text` in the client for byte-exact raw data; add one retry on transient API errors if the logs show them.

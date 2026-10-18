@@ -14,7 +14,7 @@ Status column current so this file alone answers "where am I and what's next".
 | 1 | Explore API locally, save fixtures | Done 2026-09-21 to 10-03 | Fixtures in `tests/fixtures/`, spec in `docs/`, polling design decided. |
 | 2 | Terraform: S3, IAM, SSM | Done 2026-10-03 | |
 | 3 | Collector Lambda + schedule + CloudWatch alarm | **Running since 2026-10-04 ~10:00 UTC** | Open: day-1 check, deliberate test of the Errors alarm email. |
-| 4 | Parser to Parquet + pytest tests + Glue/Athena | **Next** | Deadline pressure: DST change on 2026-10-25. |
+| 4 | Parser to Parquet + pytest tests + Glue/Athena | **In progress** (branch `practice/parser`) | `local_to_utc` and `fetched_at_from_key` done and tested; `parse_changes` / `parse_plan` next. No hard deadline: raw data is kept untouched, so the DST change on 2026-10-25 cannot lose data and the parser can run on that day's files afterwards. Only the collector must be healthy that day (check on 10-24). |
 | 5 | dbt models: staging, latest-state merge per stop, fact table, marts, tests | Not started | |
 | 6 | GitHub Actions daily dbt build (OIDC), freshness + completeness checks | Not started | |
 | 7 | Export marts + Streamlit dashboard | Not started | |
@@ -242,6 +242,9 @@ Plan: keep the existing named tests; add two parametrized tests with `ids=` (`te
 - **Boundary tests:** `test_dst_boundaries` (7 rows with `ids=`) and `test_nonexistent_time_boundaries` (2 rows). Two failures on the first run were typos in the expected values (a wrong expected UTC and a `fetched_at` copied from the previous row, which made the tie row not a tie). Lesson: inline comments that repeat the values drift from the code; the `id=` is enough.
 - **`fetched_at_from_key`:** `key: str`, `timezone.utc` instead of `ZoneInfo("UTC")`. Tests: fixed keys for `fchg` / `rchg` / `plan` (the `_slice-` suffix does not change the result), a round trip with `raw_key` over all three endpoints (a contract test: writer and reader must agree on the key format; also asserts `tzinfo == timezone.utc`, since `==` on aware datetimes cannot tell `ZoneInfo("UTC")` from `timezone.utc`), and the repeated-hour case (two Berlin fetches at 02:30 with `fold=0` / `fold=1` must get different keys that read back as 00:30 and 01:30 UTC).
 - **Result:** `uv run pytest` passes (58 tests: 31 older, 27 in `test_timeparse.py`).
+- **`message_ts_to_utc` (message timestamps, `ts-tts`):** `local_to_utc` only accepted `YYMMddHHmm`, so the DST logic was extracted into `_to_utc(naive, fetched_at)`. `local_to_utc` and `message_ts_to_utc` (format `yy-MM-dd HH:mm:ss.fff`) now only parse their string and hand over a naive datetime. The gap check compares datetimes (`candidate.astimezone(BERLIN).replace(tzinfo=None) != naive`) instead of a string against `raw`, since the helper does not know the format. Written test first (red with `ImportError`, then a `NotImplementedError` stub, then the real function). 66 tests pass.
+- Bugs hit: missing `@` before `pytest.mark.parametrize` (pytest treats the argument names as fixtures: `fixture 'raw' not found`); `859` instead of `859000` as microseconds in the expected datetime (the function was right, the test was wrong).
+- `docs/parser-design.md` now has the time-handling bullet for the two formats and a "Test cases: time conversion" section (readable copy of the tests; tests win on conflict).
 - Still open in this area: a malformed key (`"raw/fchg/foo.xml.gz"`) raises `IndexError` rather than `ValueError`; undecided.
 
 ## Next session

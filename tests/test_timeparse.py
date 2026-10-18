@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from db_delay_tracker.timeparse import local_to_utc, fetched_at_from_key, BERLIN
+from db_delay_tracker.timeparse import local_to_utc, fetched_at_from_key, message_ts_to_utc, BERLIN
 from db_delay_tracker.keys import raw_key
 
 
@@ -160,3 +160,56 @@ def test_repeated_hour_keys():
     assert first_key != second_key
     assert fetched_at_from_key(first_key) == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
     assert fetched_at_from_key(second_key) == datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc)
+
+# def test_message_ts_summer():
+#     fetched_at = datetime(2026, 10, 25, 0, 35, tzinfo=timezone.utc)
+#     result = message_ts_to_utc("26-10-02 08:32:10.859", fetched_at)
+#     assert result == (
+#         datetime(2026, 10, 2, 6, 32, 10, 859000, tzinfo=timezone.utc), False
+    # )
+
+@pytest.mark.parametrize("raw, fetched_at, expected_utc, expected_ambiguous",
+                        [
+                            pytest.param(
+                                "26-10-02 08:32:10.859",
+                                datetime(2026, 10, 2, 0, 35, tzinfo=timezone.utc),
+                                datetime(2026, 10, 2, 6, 32, 10, 859000, tzinfo=timezone.utc),
+                                False,
+                                id="summer-message_ts_to_utc"
+                            ),
+                            pytest.param(
+                                "26-01-15 12:00:00.000",
+                                datetime(2026, 10, 2, 0, 35, tzinfo=timezone.utc),
+                                datetime(2026, 1, 15, 11, 0, 0, 0, tzinfo=timezone.utc),
+                                False,
+                                id="winter-message_ts_to_utc"
+                            ),
+                            pytest.param(
+                                "26-10-25 02:30:00.000",
+                                datetime(2026, 10, 25, 0, 35, tzinfo=timezone.utc),
+                                datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc),
+                                True,
+                                id="repeated-hour-fetched-early"
+                            ),
+                            pytest.param(
+                                "26-10-25 02:30:00.000",
+                                datetime(2026, 10, 25, 1, 40, tzinfo=timezone.utc),
+                                datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc),
+                                True,
+                                id="repeated-hour-fetched-late"
+                            )
+                        ]
+                        )
+def test_message_ts_to_utc(raw, fetched_at, expected_utc, expected_ambiguous):
+    assert message_ts_to_utc(raw, fetched_at) == (expected_utc, expected_ambiguous)
+
+def test_message_to_nonexistent_time():
+    fetched_at = datetime(2026, 10, 25, 0 ,35, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match = "invalid raw time - time does not exist"):
+        message_ts_to_utc("26-03-29 02:30:00.000", fetched_at)
+
+@pytest.mark.parametrize("raw", ["", "2610020832", "26-10-02 08:32:10"])
+def test_message_ts_malformed(raw):
+    fetched_at = datetime(2026, 10, 25, 0 ,35, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match = "invalid raw time - string does not match format"):
+        message_ts_to_utc(raw, fetched_at)

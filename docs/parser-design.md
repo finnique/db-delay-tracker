@@ -92,6 +92,12 @@ is nullable.
 - XML times are German local time (`YYMMddHHmm` and `yy-MM-dd HH:mm:ss.fff`).
 - Convert to UTC; keep the raw local string next to every converted value.
 - `local_to_utc(raw, fetched_at) -> (utc_datetime, ambiguous)`.
+- Two input formats, one DST rule: `local_to_utc` takes `YYMMddHHmm` (`pt`,
+  `ct`, `clt`, `from`, `to`); `message_ts_to_utc` takes the message
+  timestamp `ts-tts`, `yy-MM-dd HH:mm:ss.fff` (millisecond precision, kept as
+  microseconds). Both only parse their string to a naive datetime and hand it
+  to a shared `_to_utc`, which does the Berlin -> UTC conversion, the
+  repeated-hour pick and the gap check, so DST is handled in one place.
 - Outside the repeated hour (02:00-02:59 on the day DST ends): one valid
   UTC instant, `ambiguous = False`.
 - Inside it: two candidates (summer/CEST and winter/CET). Pick the one
@@ -101,6 +107,53 @@ is nullable.
   real data of 2026-10-25 and re-parsed from raw if needed.
 - Spring-forward gap (02:00-02:59 does not exist): an input in the gap is a
   data error; raise, do not guess.
+
+## Test cases: time conversion
+
+Readable copy of what `tests/test_timeparse.py` checks. The tests are the
+truth; when you change a test, change the row here. `any` = the value does
+not matter for the result. Times are UTC unless marked local.
+
+### `local_to_utc(raw, fetched_at)` -> `(utc, ambiguous)`
+
+| Case | `raw` (local) | `fetched_at` | Result |
+|---|---|---|---|
+| summer | `2607151200` | any | 2026-07-15 10:00, `False` |
+| winter | `2601151200` | any | 2026-01-15 11:00, `False` |
+| repeated hour, fetched early | `2610250230` | 2026-10-25 00:35 | 00:30, `True` |
+| repeated hour, fetched late | `2610250230` | 2026-10-25 01:40 | 01:30, `True` |
+| repeated hour, exact tie | `2610250230` | 2026-10-25 01:00 | 01:30, `True` (winter wins; arbitrary but deterministic) |
+| last minute before repeated hour | `2610250159` | any | 2026-10-24 23:59, `False` |
+| repeated hour, first minute | `2610250200` | 2026-10-25 00:10 | 00:00, `True` |
+| repeated hour, last minute | `2610250259` | 2026-10-25 01:30 | 01:59, `True` |
+| first minute after repeated hour | `2610250300` | any | 2026-10-25 02:00, `False` |
+| last minute before gap | `2603290159` | any | 2026-03-29 00:59, `False` |
+| first minute after gap | `2603290300` | any | 2026-03-29 01:00, `False` |
+| in the gap (does not exist) | `2603290200`, `2603290230`, `2603290259` | any | `ValueError` "time does not exist" |
+| malformed | `""`, 9 or 11 digits, letters, `26a0250230`, month 13 (`2613450230`) | any | `ValueError` "string does not match format" |
+
+### `message_ts_to_utc(raw, fetched_at)` (same result shape; `.859` = `microsecond=859000`)
+
+Input format `yy-MM-dd HH:mm:ss.fff`.
+
+| Case | `raw` (local) | `fetched_at` | Result |
+|---|---|---|---|
+| summer | `26-10-02 08:32:10.859` | any | 2026-10-02 06:32:10.859, `False` |
+| winter | `26-01-15 12:00:00.000` | any | 11:00:00, `False` |
+| repeated hour, fetched early | `26-10-25 02:30:00.000` | 2026-10-25 00:35 | 00:30, `True` |
+| repeated hour, fetched late | `26-10-25 02:30:00.000` | 2026-10-25 01:40 | 01:30, `True` |
+| in the gap | `26-03-29 02:30:00.000` | any | `ValueError` "time does not exist" |
+| malformed | `""`, `2610020832`, `26-10-02 08:32:10` (no millis), month 13 | any | `ValueError` "string does not match format" |
+
+### `fetched_at_from_key(key)`
+
+| Case | Input | Result |
+|---|---|---|
+| fchg / rchg key | `raw/fchg/station=8000262/date=2026-10-10/105914.xml.gz` | 2026-10-10 10:59:14, tz UTC |
+| plan key | `.../105914_slice-26101012.xml.gz` | same; the slice suffix is ignored |
+| round trip | `raw_key(endpoint, eva, t)` for fchg, rchg, plan | equals `t`, `tzinfo == timezone.utc` |
+| repeated hour | `raw_key` of Berlin 02:30 with `fold=0` / `fold=1` | keys differ; read back as 00:30 / 01:30 |
+| malformed key | open: `IndexError` today, `ValueError` wanted? | undecided |
 
 ## Rules carried over
 

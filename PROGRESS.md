@@ -210,6 +210,40 @@ Then: `parse_changes` (events + messages), `parse_plan` (events + trips), on bra
 - Still to do in that file: delete the scratch code at the bottom (it runs on import) and the debug prints; add the gap check (`2603290230` must raise `ValueError`, belongs in the equal-candidates branch); input validation (wrong length / non-digits); use `timezone.utc` instead of `ZoneInfo("UTC")` in `fetch_at_from_key`.
 - **No tests written yet.** `tests/test_timeparse.py` does not exist. `scripts/local_to_utc.py` and `scripts/test_parser.py` are scratch files, untracked.
 
+### 2026-10-17 — `local_to_utc` tests and gap check (branch `practice/parser`)
+
+- Wrote `tests/test_timeparse.py` first (red, then green). 11 tests pass: summer, winter, ambiguous fetched early/late, gap raises, parametrized malformed input (`""`, 9 and 11 chars, letters, `26a0250230`, month 13). Tests check the error message with `match=`.
+- **Gap finding:** a nonexistent time (`2603290230`) does *not* give equal UTC candidates. `fold=0` uses the offset from before the change, `fold=1` the offset from after, so the candidates differ and the value would be returned as "ambiguous". Fix: round trip. Convert a UTC candidate back to Berlin; if the wall clock differs from the input, the time does not exist (`ValueError`). In the repeated hour and in normal times both candidates round-trip. This check runs before the ambiguous/normal split.
+- `fold` summary: only matters at the two clock changes. Repeated hour (autumn): `fold=0` first occurrence (summer time), `fold=1` second (winter). Gap (spring): `fold=0` old offset, `fold=1` new offset, both give impossible results. `first`/`second` are better names than `summer`/`winter`.
+- Bugs hit on the way: `isalpha()` only catches all-letter strings (use `not (raw.isascii() and raw.isdigit())`); an accidentally dropped `not` made every valid input fail; bare `except:` replaced by `except ValueError:`; a scratch call at module level crashed pytest at import. Twice pytest ran against an older version of a file than the one intended (unsaved editor buffer), so check what is on disk first.
+- `fetch_at_from_key` was renamed `fetched_at_from_key`.
+- Considered a library (pandas/polars/dateutil/pendulum): they do the offset math, but none implements "closest to fetch time + `time_ambiguous` flag". Staying with stdlib `zoneinfo`.
+- **Not committed yet.** `src/db_delay_tracker/timeparse.py` and `tests/test_timeparse.py` are untracked on `practice/parser`, plus scratch `scripts/local_to_utc.py` and `scripts/test_parser.py`.
+
+**Boundary tests to add next (spec, values checked against the current function)**
+
+| raw | fetched (UTC) | expected UTC | ambiguous |
+|---|---|---|---|
+| `2610250159` | any | 2026-10-24 23:59 | False |
+| `2610250200` | 2026-10-25 00:10 | 2026-10-25 00:00 | True |
+| `2610250259` | 2026-10-25 01:30 | 2026-10-25 01:59 | True |
+| `2610250300` | any | 2026-10-25 02:00 | False |
+| `2610250230` | 2026-10-25 01:00 (exact tie) | 2026-10-25 01:30 (winter wins) | True |
+| `2603290159` | any | 2026-03-29 00:59 | False |
+| `2603290300` | any | 2026-03-29 01:00 | False |
+| `2603290200`, `2603290259` | any | raises "time does not exist" | |
+
+Plan: keep the existing named tests; add two parametrized tests with `ids=` (`test_dst_boundaries` for the rows that return a value, `test_nonexistent_time_boundaries` for the two that raise). Comment the tie row.
+
+### 2026-10-18 — `local_to_utc` finished, `fetched_at_from_key` tested (branch `practice/parser`)
+
+- **`local_to_utc` cleanup:** removed dead code (the `if first_utc != second_utc` / `else` after an early return was always true), docstring added, f-strings without placeholders fixed. The pick between the two candidates is now `min((second_utc, first_utc), key=lambda c: abs(c - fetched_at))`.
+- **Tie-break:** `min` returns the first item on a tie, so the tuple order puts the winter candidate first. The choice is arbitrary but deterministic; it is not "more likely correct". The old `<` / `else` code sent ties to winter by accident, and the 10-17 table turned that behavior into the spec. `time_ambiguous = True` already flags these rows. Comment in the code says so.
+- **Boundary tests:** `test_dst_boundaries` (7 rows with `ids=`) and `test_nonexistent_time_boundaries` (2 rows). Two failures on the first run were typos in the expected values (a wrong expected UTC and a `fetched_at` copied from the previous row, which made the tie row not a tie). Lesson: inline comments that repeat the values drift from the code; the `id=` is enough.
+- **`fetched_at_from_key`:** `key: str`, `timezone.utc` instead of `ZoneInfo("UTC")`. Tests: fixed keys for `fchg` / `rchg` / `plan` (the `_slice-` suffix does not change the result), a round trip with `raw_key` over all three endpoints (a contract test: writer and reader must agree on the key format; also asserts `tzinfo == timezone.utc`, since `==` on aware datetimes cannot tell `ZoneInfo("UTC")` from `timezone.utc`), and the repeated-hour case (two Berlin fetches at 02:30 with `fold=0` / `fold=1` must get different keys that read back as 00:30 and 01:30 UTC).
+- **Result:** `uv run pytest` passes (58 tests: 31 older, 27 in `test_timeparse.py`).
+- Still open in this area: a malformed key (`"raw/fchg/foo.xml.gz"`) raises `IndexError` rather than `ValueError`; undecided.
+
 ## Next session
 
 - [x] Pull the official OpenAPI spec into `docs/` (done 2026-10-01).
@@ -227,7 +261,7 @@ Then: `parse_changes` (events + messages), `parse_plan` (events + trips), on bra
 - [x] Errors alarm email path proven (done 2026-10-14, see above).
 - [ ] Update CLAUDE.md by hand (untracked): UTC keys, `HHMMSS`, 1-minute `rchg`, AWS no longer pending.
 - [ ] Commit `docs/parser-design.md` and `PROGRESS.md` on `main`, then `git checkout -b practice/parser`.
-- [ ] Finish `local_to_utc`: write `tests/test_timeparse.py` first (summer, winter, ambiguous early/late fetch, gap raises, malformed parametrized, then boundary cases 02:00/02:59/03:00), clean up the file (see the 2026-10-16 entry), have Claude review. Also a test for `fetch_at_from_key`, ideally a round trip with `raw_key`.
+- [x] (Done 2026-10-18, see above.) Finish `local_to_utc`: core tests and gap check done 2026-10-17 (11 passing). Still to do: boundary tests (table in the 2026-10-17 entry); tests for `fetched_at_from_key` incl. a round trip with `raw_key` (assert `tzinfo == timezone.utc`); use `timezone.utc` instead of `ZoneInfo("UTC")` there; cleanup (dead commented prints, stale comment above `def` -> docstring, unused test imports `UTC`/`timedelta`/`ZoneInfo`, f-strings without placeholders); commit on `practice/parser` (leave out or delete scratch `scripts/local_to_utc.py`); final review by Claude.
 - [ ] Then `parse_changes` and `parse_plan` (spec in the 2026-10-14 later entry). Deadline: DST end 2026-10-25.
 - [ ] On 2026-10-25/26: check what `plan` returns for slice `...02` and whether `time_ambiguous` rows look right.
 - [ ] Phase 4: parser Lambda (raw XML → Parquet, UTC timestamps) with pytest tests against the fixtures; separate readable storage interface and its own least-privilege role (`GetObject`/`ListBucket` on `raw/`, `PutObject` on `staged/`). Decide how to handle the ambiguous local-time strings during the DST hour.

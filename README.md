@@ -102,6 +102,17 @@ uv run scripts/build_lambda.py
 cd infra && terraform apply
 ```
 
+## How this was built
+
+I designed the architecture and made the modeling decisions, and used Claude
+Code as a pair programmer. The Terraform, Lambda packaging and collector glue
+were largely AI-generated and reviewed by me. I wrote the time-handling code
+(`src/db_delay_tracker/timeparse.py`, including the DST edge cases) and its
+tests (`tests/test_timeparse.py`) myself, with hints and review along the way.
+The XML parser (Phase 4) is being written the same way. These are the best
+files to review for my own code. [PROGRESS.md](PROGRESS.md) logs what was done
+in each session.
+
 ## Known limitations
 
 - The collector uses an IAM user with CLI keys for Terraform; IAM Identity
